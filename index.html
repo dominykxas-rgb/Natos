@@ -88,6 +88,16 @@
     return null;
   }
 
+  // Video turi visas tilpti lange, kitaip dalis nepatenka į nuotrauką
+  function fitPlayer() {
+    const wrap = $('playerWrap');
+    const maxW = wrap.parentElement.clientWidth;
+    const fitW = Math.floor((innerHeight - 60) * 16 / 9);
+    wrap.style.width = Math.max(320, Math.min(maxW, fitW)) + 'px';
+    wrap.style.marginLeft = wrap.style.marginRight = 'auto';
+  }
+  addEventListener('resize', () => { if ($('playerWrap').style.display !== 'none') fitPlayer(); });
+
   function loadVideo(id) {
     return new Promise((resolve, reject) => {
       const wait = () => { if (!apiReady) return setTimeout(wait, 100); go(); };
@@ -201,7 +211,9 @@
       return segs >= 15 && segLen / Math.max(1, segs) >= 2.5;
     };
     const kb = new Uint8Array(H);
-    for (const [a, b] of runs(Array.from({ length: H }, (_, y) => kbRow(y) ? 1 : 0), 0.5, 1, Math.ceil(H * 0.04))) {
+    for (const [a, b] of runs(Array.from({ length: H }, (_, y) => kbRow(y) ? 1 : 0), 0.5, 1, 2)) {
+      const atEdge = a <= 2 || b >= H - 3;
+      if (b - a + 1 < H * (atEdge ? 0.015 : 0.04)) continue;
       let e0 = Math.max(0, a - 1), e1 = Math.min(H - 1, b + 1);
       // apatinė baltų klavišų dalis: vertikalios linijos tęsiasi
       while (e1 + 1 < H && gyr[e1 + 1] < 4 && gxr[e1 + 1] > 6) e1++;
@@ -305,6 +317,8 @@
     $('result').style.display = 'none';
     try {
       $('playerWrap').style.display = 'block';
+      fitPlayer();
+      $('playerWrap').scrollIntoView({ behavior: 'instant', block: 'center' });
       status('Leiskite naršyklei matyti šį skirtuką (iššokusiame lange spauskite „Leisti“)…');
       await getStream();
       status('Įkeliamas video…');
@@ -313,7 +327,9 @@
     } catch (e) { status(e.message, true); $('goBtn').disabled = false; if (!playerReady) $('playerWrap').style.display = 'none'; return; }
 
     pages = []; lastSample = null; lastSaved = null; unstable = 0; lastBox = null; running = true;
+    fitPlayer();
     $('playerWrap').scrollIntoView({ behavior: 'instant', block: 'center' });
+    await new Promise(r => setTimeout(r, 300));
     $('progress').style.display = 'block'; $('progress').firstElementChild.style.width = '0';
     player.seekTo(0, true); player.setPlaybackRate(SPEED); player.playVideo();
     status('Žiūriu video… Nepereikite į kitą skirtuką ir neslinkite puslapio.');
