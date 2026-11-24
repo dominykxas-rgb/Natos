@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="lt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Natos iš YouTube → PDF</title>
+<style>
+  :root{--bg:#f6f3ee;--card:#fffdf9;--ink:#1f1d1a;--muted:#6b655c;--line:#e3ddd3;--accent:#7a3e2b;--accent-2:#a85a3f}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:28px 20px 60px}
+  h1{font-family:Georgia,"Times New Roman",serif;font-weight:600;font-size:32px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 20px}
+  .bar{display:flex;gap:10px;flex-wrap:wrap}
+  input{flex:1;min-width:260px;padding:13px 14px;border:1px solid var(--line);border-radius:10px;font:inherit;background:#fff}
+  button{font:inherit;font-weight:600;padding:12px 22px;border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}
+  button:hover{background:var(--accent-2)}
+  button.ghost{background:#fff;color:var(--accent);font-weight:500}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #status{margin:14px 0 6px;min-height:1.5em;font-size:15px}
+  #status.err{color:#a3261b}
+  #progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;display:none}
+  #progress div{height:100%;width:0;background:var(--accent);transition:width .4s}
+  #playerWrap{position:relative;width:100%;aspect-ratio:16/9;background:#111;border-radius:12px;overflow:hidden;margin-top:14px;display:none}
+  #player,#playerWrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+  #shield{position:absolute;inset:0;z-index:2}
+  #result{display:none;margin-top:22px}
+  #result h2{font-family:Georgia,serif;font-weight:600;font-size:22px;margin:0 0 10px}
+  #pdfView{width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:#fff}
+  #thumbs{display:flex;gap:10px;overflow-x:auto;padding:10px 0}
+  .t{position:relative;flex:0 0 auto}
+  .t img{height:90px;border:1px solid var(--line);border-radius:6px;background:#fff;display:block}
+  .t button{position:absolute;top:4px;right:4px;padding:0 7px;font-size:13px;line-height:20px;border-radius:50%}
+  .note{color:var(--muted);font-size:14px}
+  #capVideo{position:fixed;left:0;bottom:0;width:1px;height:1px;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Natos iš YouTube → PDF</h1>
+  <p class="sub">Įklijuokite nuorodą ir spauskite mygtuką. Programa pati peržiūrės video ir sudės natas į PDF.</p>
+
+  <div class="bar">
+    <input id="url" placeholder="https://www.youtube.com/watch?v=...">
+    <button id="goBtn">Sukurti PDF</button>
+  </div>
+  <div id="status"></div>
+  <div id="progress"><div></div></div>
+
+  <div id="playerWrap"><div id="player"></div><div id="shield"></div></div>
+
+  <div id="result">
+    <h2>Jūsų PDF</h2>
+    <div class="bar" style="margin-bottom:12px">
+      <button id="dlBtn">⬇ Atsisiųsti PDF</button>
+      <button id="againBtn" class="ghost">Kitas video</button>
+    </div>
+    <iframe id="pdfView" title="PDF peržiūra"></iframe>
+    <p class="note">Jei įsimaišė nereikalingas kadras, paspauskite ✕ ir PDF persidarys.</p>
+    <div id="thumbs"></div>
+  </div>
+</div>
+<video id="capVideo" muted playsinline></video>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : ''; };
+  const SPEED = 2, TICK = 250;
+
+  // ---------- YouTube ----------
+  let player = null, playerReady = false, apiReady = false, onReadyCb = null, videoTitle = 'natos';
+  window.onYouTubeIframeAPIReady = () => { apiReady = true; };
+  const tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+
+  function parseId(s) {
+    s = (s || '').trim();
+    if (/^[\w-]{11}$/.test(s)) return s;
+    try {
+      const u = new URL(s);
+      if (u.hostname.includes('youtu.be')) return u.pathname.slice(1, 12) || null;
+      const v = u.searchParams.get('v'); if (v) return v.slice(0, 11);
+      const m = u.pathname.match(/\/(embed|shorts|live|v)\/([\w-]{11})/); if (m) return m[2];
+    } catch (e) {}
+    return null;
+  }
+
+  function loadVideo(id) {
+    return new Promise((resolve, reject) => {
+      const wait = () => { if (!apiReady) return setTimeout(wait, 100); go(); };
+      const go = () => {
+        $('playerWrap').style.display = 'block';
+        if (player && playerReady) { player.cueVideoById(id); setTimeout(resolve, 800); return; }
+        player = new YT.Player('player', {
+          videoId: id, width: '100%', height: '100%',
+          playerVars: { controls: 0, rel: 0, modestbranding: 1, iv_load_policy: 3, playsinline: 1, disablekb: 1, fs: 0, cc_load_policy: 0 },
+          events: {
+            onReady: () => { playerReady = true; resolve(); },
+            onStateChange: e => { if (e.data === YT.PlayerState.ENDED && running) finish(); },
+            onError: e => {
+              const blocked = e.data === 101 || e.data === 150;
+              const msg = blocked ? 'Šio video autorius neleidžia jo rodyti kitose svetainėse, todėl jo apdoroti nepavyks. Pabandykite kitą video.'
+                : 'Nepavyko paleisti video. Patikrinkite nuorodą.';
+              if (running) abort(msg); else reject(new Error(msg));
+            }
+          }
+        });
+      };
+      wait();
+    });
+  }
+
+  // ---------- Ekrano fiksavimas ----------
+  const capVideo = $('capVideo');
+  let stream = null;
+
+  async function getStream() {
+    if (stream && stream.active) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia)
+      throw new Error('Ši naršyklė netinka. Atidarykite svetainę kompiuteryje su Chrome arba Edge.');
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'browser', frameRate: { ideal: 10 }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+        audio: false, preferCurrentTab: true, selfBrowserSurface: 'include'
+      });
+    } catch (e) {
+      throw new Error('Reikia leisti naršyklei matyti šį skirtuką. Spauskite „Sukurti PDF“ dar kartą ir pasirinkite „Leisti“.');
+    }
+    stream.getVideoTracks()[0].addEventListener('ended', () => { stream = null; if (running) abort('Fiksavimas buvo sustabdytas.'); });
+    capVideo.srcObject = stream;
+    try { await capVideo.play(); } catch (e) {}
+    const t0 = performance.now();
+    while (!capVideo.videoWidth && performance.now() - t0 < 3000) await new Promise(r => setTimeout(r, 50));
+    const ar1 = capVideo.videoWidth / capVideo.videoHeight, ar2 = innerWidth / innerHeight;
+    if (Math.abs(ar1 / ar2 - 1) > 0.1) {
+      stream.getTracks().forEach(t => t.stop()); stream = null;
+      throw new Error('Pasirinkote ne tą skirtuką. Spauskite „Sukurti PDF“ dar kartą ir rinkitės „šį skirtuką“.');
+    }
+  }
+
+  // Grotuvo vieta fiksuojamame vaizde
+  function playerRect() {
+    const vw = capVideo.videoWidth, vh = capVideo.videoHeight;
+    const r = $('playerWrap').getBoundingClientRect();
+    const sx = vw / innerWidth, sy = vh / innerHeight;
+    const x = clamp(r.left * sx, 0, vw), y = clamp(r.top * sy, 0, vh);
+    return { x, y, w: Math.max(1, clamp((r.left + r.width) * sx, 0, vw) - x), h: Math.max(1, clamp((r.top + r.height) * sy, 0, vh) - y) };
+  }
+  function grab(r, w, h) {
+    w = Math.max(1, Math.round(w || r.w)); h = Math.max(1, Math.round(h || r.h));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d', { willReadFrequently: true }).drawImage(capVideo, r.x, r.y, r.w, r.h, 0, 0, w, h);
+    return c;
+  }
+
+  // ---------- Natų srities paieška ----------
+  // Natos dažniausiai būna baltame fone: ieškome didžiausio šviesaus stačiakampio
+  function runs(arr, thr, gap, minLen) {
+    const out = []; let s = -1, lastGood = -1;
+    for (let i = 0; i <= arr.length; i++) {
+      const good = i < arr.length && arr[i] > thr;
+      if (good) { if (s < 0) s = i; lastGood = i; }
+      else if (s >= 0 && (i - lastGood > gap || i === arr.length)) {
+        if (lastGood - s + 1 >= minLen) out.push([s, lastGood]);
+        s = -1;
+      }
+    }
+    return out;
+  }
+  function findSheet(gray, W, H) {
+    const white = new Float32Array(H), mean = new Float32Array(H), gxr = new Float32Array(H), gyr = new Float32Array(H);
+    for (let y = 0; y < H; y++) {
+      let n = 0, s = 0, gx = 0, gy = 0;
+      for (let x = 0; x < W; x++) {
+        const p = gray[y * W + x]; s += p; if (p > 190) n++;
+        if (x < W - 1) gx += Math.abs(gray[y * W + x + 1] - p);
+        if (y < H - 1) gy += Math.abs(gray[(y + 1) * W + x] - p);
+      }
+      white[y] = n / W; mean[y] = s / W; gxr[y] = gx / W; gyr[y] = gy / W;
+    }
+    // Pianino klaviatūra: daug vertikalių kraštų, eilutės beveik vienodos; būna prie viršaus ar apačios
+    const kb = new Uint8Array(H);
+    const kbRow = y => gxr[y] > 12 && gyr[y] < 4;
+    for (const [a, b] of runs(Array.from({ length: H }, (_, y) => kbRow(y) ? 1 : 0), 0.5, 1, Math.ceil(H * 0.05))) {
+      if (a < H * 0.06 || b > H * 0.94) {
+        const ext0 = a < H * 0.06 ? 0 : a - 1, ext1 = b > H * 0.94 ? H - 1 : b + 1;
+        for (let y = ext0; y <= ext1; y++) kb[y] = 1;
+      }
+    }
+    const paper = Array.from({ length: H }, (_, y) => (!kb[y] && (white[y] > 0.4 || mean[y] > 150)) ? 1 : 0);
+    let best = null, bestScore = 0;
+    for (let [y0, y1] of runs(paper, 0.5, Math.ceil(H * 0.03), Math.ceil(H * 0.12))) {
+      const col = new Float32Array(W);
+      for (let x = 0; x < W; x++) { let n = 0; for (let y = y0; y <= y1; y++) if (gray[y * W + x] > 150) n++; col[x] = n / (y1 - y0 + 1); }
+      const cr = runs(col, 0.5, 2, Math.ceil(W * 0.3));
+      if (!cr.length) continue;
+      let [x0, x1] = cr.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a));
+      // nukerpam tuščius kraštus, paliekant nedidelę paraštę
+      const rowInk = y => { let n = 0; for (let x = x0; x <= x1; x++) if (gray[y * W + x] < 150) n++; return n; };
+      const colInk = x => { let n = 0; for (let y = y0; y <= y1; y++) if (gray[y * W + x] < 150) n++; return n; };
+      while (y0 < y1 && rowInk(y0) === 0) y0++;
+      while (y1 > y0 && rowInk(y1) === 0) y1--;
+      while (x0 < x1 && colInk(x0) === 0) x0++;
+      while (x1 > x0 && colInk(x1) === 0) x1--;
+      const pad = Math.round(H * 0.02);
+      y0 = Math.max(0, y0 - pad); y1 = Math.min(H - 1, y1 + pad); x0 = Math.max(0, x0 - pad); x1 = Math.min(W - 1, x1 + pad);
+      while (kb[y1] && y1 > y0) y1--; while (kb[y0] && y0 < y1) y0++;
+      if (y1 - y0 + 1 < H * 0.12) continue;
+      let dark = 0, tot = 0, gx = 0, gy = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const v = gray[y * W + x]; tot++; if (v < 110) dark++;
+        gx += Math.abs(gray[y * W + x + 1] - v); gy += Math.abs(gray[(y + 1) * W + x] - v);
+      }
+      const ratio = gy / (gx + 1);
+      if (dark / tot < 0.01 || ratio < 0.35) continue;
+      // turi būti penklinės linijų: eilutės, kurios beveik per visą plotį tamsesnės
+      let staffRows = 0;
+      for (let y = y0; y <= y1; y++) { let n = 0; for (let x = x0; x <= x1; x++) if (gray[y * W + x] < 170) n++; if (n / (x1 - x0 + 1) > 0.6) staffRows++; }
+      if (staffRows < 3) continue;
+      const score = (y1 - y0 + 1) * (x1 - x0 + 1) * Math.min(ratio, 2);
+      if (score > bestScore) { bestScore = score; best = { x: x0 / W, y: y0 / H, w: (x1 - x0 + 1) / W, h: (y1 - y0 + 1) / H }; }
+    }
+    return best;
+  }
+  function toGray(c) {
+    const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
+    const g = new Uint8Array(c.width * c.height);
+    for (let i = 0; i < g.length; i++) g[i] = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+    return g;
+  }
+  function sigOf(c) {
+    const W = 96, H = 64;
+    const t = document.createElement('canvas'); t.width = W; t.height = H;
+    t.getContext('2d', { willReadFrequently: true }).drawImage(c, 0, 0, W, H);
+    return toGray(t);
+  }
+  function diff(a, b) {
+    if (!a || !b || a.length !== b.length) return 1;
+    let n = 0; for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 40) n++;
+    return n / a.length;
+  }
+  const TH = 0.03;
+
+  // ---------- Fiksavimo ciklas ----------
+  const ticker = new Worker(URL.createObjectURL(new Blob(
+    ['let t=null;onmessage=e=>{clearInterval(t);if(e.data>0)t=setInterval(()=>postMessage(0),e.data);}'], { type: 'text/javascript' })));
+  ticker.onmessage = tick;
+
+  let running = false, pages = [], lastSample = null, lastSaved = null, unstable = 0, lastBox = null;
+
+  function tick() {
+    if (!running || !stream || !capVideo.videoWidth) return;
+    try {
+      const d = player.getDuration() || 0, c = player.getCurrentTime() || 0;
+      if (d) $('progress').firstElementChild.style.width = (c / d * 100) + '%';
+    } catch (e) {}
+    const pr = playerRect();
+    const small = grab(pr, 320, Math.round(320 * pr.h / pr.w));
+    let box = findSheet(toGray(small), small.width, small.height);
+    if (!box) { unstable = 0; return; }
+    // jei sritis beveik tokia pati kaip anksčiau, paliekam seną (kad kadrai nesiskirtų dėl smulkmenų)
+    if (lastBox && Math.abs(box.x - lastBox.x) < 0.03 && Math.abs(box.y - lastBox.y) < 0.03 &&
+        Math.abs(box.x + box.w - lastBox.x - lastBox.w) < 0.03 && Math.abs(box.y + box.h - lastBox.y - lastBox.h) < 0.03) box = lastBox;
+    lastBox = box;
+    const r = { x: pr.x + box.x * pr.w, y: pr.y + box.y * pr.h, w: box.w * pr.w, h: box.h * pr.h };
+    const c = grab(r);
+    const s = sigOf(c);
+    const dPrev = diff(s, lastSample), dSaved = diff(s, lastSaved);
+    lastSample = s;
+    if (dPrev < TH / 2) { unstable = 0; if (dSaved > TH) keep(c, s); }
+    else if (++unstable >= 8 && dSaved > TH * 3) { keep(c, s); unstable = 0; }  // slenkančios natos
+  }
+  function keep(c, s) {
+    lastSaved = s;
+    if (pages.some(p => diff(p.sig, s) < TH / 2)) return; // jau turim tokį
+    pages.push({ canvas: c, sig: s });
+    status('Žiūriu video… Rasta natų puslapių: ' + pages.length);
+  }
+
+  async function start() {
+    const id = parseId($('url').value);
+    if (!id) { status('Neatpažinau YouTube nuorodos.', true); return; }
+    $('goBtn').disabled = true;
+    $('result').style.display = 'none';
+    try {
+      status('Leiskite naršyklei matyti šį skirtuką (iššokusiame lange spauskite „Leisti“)…');
+      await getStream();
+      status('Įkeliamas video…');
+      await loadVideo(id);
+      try { videoTitle = (player.getVideoData().title || 'natos'); } catch (e) {}
+    } catch (e) { status(e.message, true); $('goBtn').disabled = false; return; }
+
+    pages = []; lastSample = null; lastSaved = null; unstable = 0; lastBox = null; running = true;
+    $('playerWrap').scrollIntoView({ behavior: 'instant', block: 'center' });
+    $('progress').style.display = 'block'; $('progress').firstElementChild.style.width = '0';
+    player.seekTo(0, true); player.setPlaybackRate(SPEED); player.playVideo();
+    status('Žiūriu video… Nepereikite į kitą skirtuką ir neslinkite puslapio.');
+    ticker.postMessage(TICK);
+  }
+
+  function stopAll() {
+    running = false; ticker.postMessage(0);
+    try { player.pauseVideo(); } catch (e) {}
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    $('progress').style.display = 'none';
+    $('goBtn').disabled = false;
+  }
+  function abort(msg) { stopAll(); status(msg, true); }
+  async function finish() {
+    stopAll();
+    $('playerWrap').style.display = 'none';
+    if (!pages.length) { status('Natų video nepavyko rasti. Programa ieško natų baltame fone.', true); return; }
+    status('Baigta! Rasta natų puslapių: ' + pages.length + '.');
+    await makePdf();
+    $('result').style.display = 'block';
+    $('result').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  // ---------- PDF ----------
+  let pdfUrl = null;
+  function clean(c) {
+    const o = document.createElement('canvas'); o.width = c.width; o.height = c.height;
+    const x = o.getContext('2d'); x.drawImage(c, 0, 0);
+    const im = x.getImageData(0, 0, o.width, o.height), d = im.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const g = clamp(((d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) - 70) * 255 / 120, 0, 255);
+      d[i] = d[i + 1] = d[i + 2] = g;
+    }
+    x.putImageData(im, 0, 0);
+    return squeeze(o, d);
+  }
+  // Sutraukiam dideles tuščias juostas tarp natų eilučių
+  function squeeze(o, d) {
+    const W = o.width, H = o.height, maxGap = Math.max(6, Math.round(W * 0.03));
+    const blank = new Uint8Array(H);
+    for (let y = 0; y < H; y++) { let ink = 0; for (let x = 0; x < W; x++) if (d[(y * W + x) * 4] < 160) ink++; blank[y] = ink <= W * 0.002 ? 1 : 0; }
+    const keep = []; let run = 0;
+    for (let y = 0; y < H; y++) { run = blank[y] ? run + 1 : 0; if (run <= maxGap) keep.push(y); }
+    // ir kraštuose paliekam tik nedidelę paraštę
+    while (keep.length > 1 && blank[keep[0]] && blank[keep[1]] && keep.length > H * 0.2 && countLead(keep, blank) > maxGap / 2) keep.shift();
+    if (keep.length === H) return o;
+    const n = document.createElement('canvas'); n.width = W; n.height = keep.length;
+    const nx = n.getContext('2d');
+    let i = 0;
+    while (i < keep.length) { let j = i; while (j + 1 < keep.length && keep[j + 1] === keep[j] + 1) j++; nx.drawImage(o, 0, keep[i], W, j - i + 1, 0, i, W, j - i + 1); i = j + 1; }
+    return n;
+  }
+  function countLead(keep, blank) { let k = 0; while (k < keep.length && blank[keep[k]]) k++; return k; }
+  const toJpeg = c => new Promise(res => c.toBlob(b => b.arrayBuffer().then(a => res(new Uint8Array(a))), 'image/jpeg', 0.92));
+
+  function layout(imgs) {
+    const PW = 595.28, PH = 841.89, M = 28, GAP = 12, AW = PW - 2 * M, AH = PH - 2 * M;
+    const out = []; let cur = [], y = 0;
+    imgs.forEach((im, i) => {
+      let w = AW, h = AW * im.h / im.w;
+      if (h > AH) { h = AH; w = AH * im.w / im.h; }
+      if (cur.length && y + h > AH) { out.push(cur); cur = []; y = 0; }
+      cur.push({ i, x: M + (AW - w) / 2, y: M + y, w, h });
+      y += h + GAP;
+    });
+    if (cur.length) out.push(cur);
+    return { pages: out, PW, PH };
+  }
+  function buildPdf(imgs) {
+    const enc = new TextEncoder(); const parts = []; let len = 0; const offs = [];
+    const push = d => { const b = typeof d === 'string' ? enc.encode(d) : d; parts.push(b); len += b.length; };
+    const n = imgs.length, L = layout(imgs), f = v => v.toFixed(2);
+    push('%PDF-1.4\n%âãÏÓ\n');
+    const obj = (id, body) => { offs[id] = len; push(id + ' 0 obj\n'); body(); push('\nendobj\n'); };
+    obj(1, () => push('<< /Type /Catalog /Pages 2 0 R >>'));
+    const pageIds = L.pages.map((_, p) => 3 + n + 2 * p);
+    obj(2, () => push('<< /Type /Pages /Kids [' + pageIds.map(id => id + ' 0 R').join(' ') + '] /Count ' + pageIds.length + ' >>'));
+    imgs.forEach((im, i) => obj(3 + i, () => {
+      push('<< /Type /XObject /Subtype /Image /Width ' + im.w + ' /Height ' + im.h +
+        ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + im.bytes.length + ' >>\nstream\n');
+      push(im.bytes); push('\nendstream');
+    }));
+    L.pages.forEach((pl, p) => {
+      const pid = pageIds[p], cid = pid + 1;
+      const xo = pl.map(q => '/Im' + q.i + ' ' + (3 + q.i) + ' 0 R').join(' ');
+      obj(pid, () => push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + f(L.PW) + ' ' + f(L.PH) + '] /Resources << /XObject << ' + xo + ' >> >> /Contents ' + cid + ' 0 R >>'));
+      const content = pl.map(q => 'q ' + f(q.w) + ' 0 0 ' + f(q.h) + ' ' + f(q.x) + ' ' + f(L.PH - q.y - q.h) + ' cm /Im' + q.i + ' Do Q').join('\n');
+      obj(cid, () => push('<< /Length ' + enc.encode(content).length + ' >>\nstream\n' + content + '\nendstream'));
+    });
+    const size = 3 + n + 2 * L.pages.length, xref = len;
+    let x = 'xref\n0 ' + size + '\n0000000000 65535 f \n';
+    for (let id = 1; id < size; id++) x += String(offs[id]).padStart(10, '0') + ' 00000 n \n';
+    push(x + 'trailer\n<< /Size ' + size + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
+    return new Blob(parts, { type: 'application/pdf' });
+  }
+
+  async function makePdf() {
+    const imgs = [];
+    for (const p of pages) {
+      if (!p.clean) { const c = clean(p.canvas); p.clean = { w: c.width, h: c.height, bytes: await toJpeg(c) }; p.thumb = c.toDataURL('image/jpeg', 0.6); }
+      imgs.push(p.clean);
+    }
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    pdfUrl = URL.createObjectURL(buildPdf(imgs));
+    $('pdfView').src = pdfUrl;
+    renderThumbs();
+  }
+  function renderThumbs() {
+    const box = $('thumbs'); box.innerHTML = '';
+    pages.forEach((p, i) => {
+      const d = document.createElement('div'); d.className = 't';
+      const img = document.createElement('img'); img.src = p.thumb; img.title = (i + 1) + ' kadras';
+      const x = document.createElement('button'); x.textContent = '✕'; x.title = 'Pašalinti';
+      x.onclick = async () => { pages.splice(i, 1); if (pages.length) await makePdf(); else { $('result').style.display = 'none'; status('Visi kadrai pašalinti.'); } };
+      d.append(img, x); box.appendChild(d);
+    });
+  }
+
+  $('goBtn').onclick = start;
+  $('url').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('goBtn').disabled) start(); });
+  $('dlBtn').onclick = () => {
+    const a = document.createElement('a'); a.href = pdfUrl;
+    a.download = (videoTitle.replace(/[\\/:*?"<>|]/g, '_').trim() || 'natos') + '.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  $('againBtn').onclick = () => { $('result').style.display = 'none'; $('url').value = ''; status(''); $('url').focus(); window.scrollTo(0, 0); };
+})();
+</script>
+</body>
+</html>
