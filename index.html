@@ -286,6 +286,8 @@
     try {
       const d = player.getDuration() || 0, c = player.getCurrentTime() || 0;
       if (d) $('progress').firstElementChild.style.width = (c / d * 100) + '%';
+      // pradžioje ir kai video negroja, YouTube rodo savo užrašus ant vaizdo
+      if (c < 2.5 || player.getPlayerState() !== YT.PlayerState.PLAYING) { lastSample = null; unstable = 0; return; }
     } catch (e) {}
     const pr = playerRect();
     const small = grab(pr, 320, Math.round(320 * pr.h / pr.w));
