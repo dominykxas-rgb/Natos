@@ -21,7 +21,7 @@
   #status.err{color:#a3261b}
   #progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;display:none}
   #progress div{height:100%;width:0;background:var(--accent);transition:width .4s}
-  #playerWrap{position:relative;width:100%;aspect-ratio:16/9;background:#111;border-radius:12px;overflow:hidden;margin-top:14px;display:none}
+  #playerWrap{position:relative;width:100%;aspect-ratio:16/9;background:#111;border-radius:4px;margin-top:30px;margin-bottom:20px;box-shadow:0 0 0 18px #111;display:none}
   #player,#playerWrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
   #shield{position:absolute;inset:0;z-index:2}
   #result{display:none;margin-top:22px}
@@ -115,7 +115,7 @@
 
   // ---------- Ekrano fiksavimas ----------
   const capVideo = $('capVideo');
-  let stream = null;
+  let stream = null, cropped = false;
 
   async function getStream() {
     if (stream && stream.active) return;
@@ -129,25 +129,34 @@
     } catch (e) {
       throw new Error('Reikia leisti naršyklei matyti šį skirtuką. Spauskite „Sukurti PDF“ dar kartą ir pasirinkite „Leisti“.');
     }
-    stream.getVideoTracks()[0].addEventListener('ended', () => { stream = null; if (running) abort('Fiksavimas buvo sustabdytas.'); });
-    capVideo.srcObject = stream;
-    try { await capVideo.play(); } catch (e) {}
-    const t0 = performance.now();
-    while (!capVideo.videoWidth && performance.now() - t0 < 3000) await new Promise(r => setTimeout(r, 50));
-    const ar1 = capVideo.videoWidth / capVideo.videoHeight, ar2 = innerWidth / innerHeight;
-    if (Math.abs(ar1 / ar2 - 1) > 0.1) {
+    const track = stream.getVideoTracks()[0];
+    track.addEventListener('ended', () => { stream = null; if (running) abort('Fiksavimas buvo sustabdytas.'); });
+    const surface = track.getSettings ? track.getSettings().displaySurface : undefined;
+    if (surface && surface !== 'browser') {
       stream.getTracks().forEach(t => t.stop()); stream = null;
       throw new Error('Pasirinkote ne tą skirtuką. Spauskite „Sukurti PDF“ dar kartą ir rinkitės „šį skirtuką“.');
     }
+    // Chrome gali iškirpti tik grotuvo sritį: tada nereikia nieko skaičiuoti
+    cropped = false;
+    if (window.CropTarget && track.cropTo) {
+      try { await track.cropTo(await CropTarget.fromElement($('playerWrap'))); cropped = true; } catch (e) { cropped = false; }
+    }
+    capVideo.srcObject = stream;
+    try { await capVideo.play(); } catch (e) {}
+    const t0 = performance.now();
+    while (!capVideo.videoWidth && performance.now() - t0 < 4000) await new Promise(r => setTimeout(r, 50));
   }
 
   // Grotuvo vieta fiksuojamame vaizde
   function playerRect() {
     const vw = capVideo.videoWidth, vh = capVideo.videoHeight;
+    if (cropped) return { x: 0, y: 0, w: vw, h: vh };
+    // skirtukas įtalpinamas į kadrą išlaikant proporcijas (gali būti juodi kraštai)
     const r = $('playerWrap').getBoundingClientRect();
-    const sx = vw / innerWidth, sy = vh / innerHeight;
-    const x = clamp(r.left * sx, 0, vw), y = clamp(r.top * sy, 0, vh);
-    return { x, y, w: Math.max(1, clamp((r.left + r.width) * sx, 0, vw) - x), h: Math.max(1, clamp((r.top + r.height) * sy, 0, vh) - y) };
+    const sc = Math.min(vw / innerWidth, vh / innerHeight);
+    const ox = (vw - innerWidth * sc) / 2, oy = (vh - innerHeight * sc) / 2;
+    const x = clamp(ox + r.left * sc, 0, vw), y = clamp(oy + r.top * sc, 0, vh);
+    return { x, y, w: Math.max(1, clamp(ox + (r.left + r.width) * sc, 0, vw) - x), h: Math.max(1, clamp(oy + (r.top + r.height) * sc, 0, vh) - y) };
   }
   function grab(r, w, h) {
     w = Math.max(1, Math.round(w || r.w)); h = Math.max(1, Math.round(h || r.h));
@@ -181,14 +190,23 @@
       }
       white[y] = n / W; mean[y] = s / W; gxr[y] = gx / W; gyr[y] = gy / W;
     }
-    // Pianino klaviatūra: daug vertikalių kraštų, eilutės beveik vienodos; būna prie viršaus ar apačios
-    const kb = new Uint8Array(H);
-    const kbRow = y => gxr[y] > 12 && gyr[y] < 4;
-    for (const [a, b] of runs(Array.from({ length: H }, (_, y) => kbRow(y) ? 1 : 0), 0.5, 1, Math.ceil(H * 0.05))) {
-      if (a < H * 0.06 || b > H * 0.94) {
-        const ext0 = a < H * 0.06 ? 0 : a - 1, ext1 = b > H * 0.94 ? H - 1 : b + 1;
-        for (let y = ext0; y <= ext1; y++) kb[y] = 1;
+    // Pianino klaviatūra: daug taisyklingų juodų klavišų, eilutės beveik vienodos
+    const kbRow = y => {
+      if (!(gxr[y] > 12 && gyr[y] < 4)) return false;
+      let segs = 0, segLen = 0, inSeg = false;
+      for (let x = 0; x < W; x++) {
+        const d = gray[y * W + x] < 128;
+        if (d) { segLen++; if (!inSeg) { segs++; inSeg = true; } } else inSeg = false;
       }
+      return segs >= 15 && segLen / Math.max(1, segs) >= 2.5;
+    };
+    const kb = new Uint8Array(H);
+    for (const [a, b] of runs(Array.from({ length: H }, (_, y) => kbRow(y) ? 1 : 0), 0.5, 1, Math.ceil(H * 0.04))) {
+      let e0 = Math.max(0, a - 1), e1 = Math.min(H - 1, b + 1);
+      // apatinė baltų klavišų dalis: vertikalios linijos tęsiasi
+      while (e1 + 1 < H && gyr[e1 + 1] < 4 && gxr[e1 + 1] > 6) e1++;
+      while (e0 - 1 >= 0 && gyr[e0 - 1] < 4 && gxr[e0 - 1] > 6) e0--;
+      for (let y = e0; y <= e1; y++) kb[y] = 1;
     }
     const paper = Array.from({ length: H }, (_, y) => (!kb[y] && (white[y] > 0.4 || mean[y] > 150)) ? 1 : 0);
     let best = null, bestScore = 0;
@@ -286,12 +304,13 @@
     $('goBtn').disabled = true;
     $('result').style.display = 'none';
     try {
+      $('playerWrap').style.display = 'block';
       status('Leiskite naršyklei matyti šį skirtuką (iššokusiame lange spauskite „Leisti“)…');
       await getStream();
       status('Įkeliamas video…');
       await loadVideo(id);
       try { videoTitle = (player.getVideoData().title || 'natos'); } catch (e) {}
-    } catch (e) { status(e.message, true); $('goBtn').disabled = false; return; }
+    } catch (e) { status(e.message, true); $('goBtn').disabled = false; if (!playerReady) $('playerWrap').style.display = 'none'; return; }
 
     pages = []; lastSample = null; lastSaved = null; unstable = 0; lastBox = null; running = true;
     $('playerWrap').scrollIntoView({ behavior: 'instant', block: 'center' });
